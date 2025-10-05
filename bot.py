@@ -5,6 +5,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 from datetime import datetime
 import json
 import os
+import pickle
 
 # Настройки бота
 BOT_TOKEN = "7573319037:AAG_AGqsmds9z212-i083AKEv-qMbaAP1OA"
@@ -38,12 +39,13 @@ logger = logging.getLogger(__name__)
 ORDERS_FILE = 'orders.json'
 REVIEWS_FILE = 'reviews.json'
 ACTIVE_CHATS_FILE = 'active_chats.json'
+USER_DATA_FILE = 'user_data.pkl'
 
 class DataManager:
     """Класс для управления данными с сохранением в файлы"""
     
     @staticmethod
-    def load_data(filename):
+    def load_data(filename, default_type=dict):
         """Загрузка данных из файла"""
         try:
             if os.path.exists(filename):
@@ -51,7 +53,7 @@ class DataManager:
                     return json.load(f)
         except Exception as e:
             logger.error(f"Ошибка загрузки {filename}: {e}")
-        return {}
+        return default_type()
     
     @staticmethod
     def save_data(filename, data):
@@ -63,24 +65,68 @@ class DataManager:
         except Exception as e:
             logger.error(f"Ошибка сохранения {filename}: {e}")
             return False
+    
+    @staticmethod
+    def load_user_data():
+        """Загрузка user_data"""
+        try:
+            if os.path.exists(USER_DATA_FILE):
+                with open(USER_DATA_FILE, 'rb') as f:
+                    return pickle.load(f)
+        except Exception as e:
+            logger.error(f"Ошибка загрузки user_data: {e}")
+        return {}
+    
+    @staticmethod
+    def save_user_data(user_data):
+        """Сохранение user_data"""
+        try:
+            with open(USER_DATA_FILE, 'wb') as f:
+                pickle.dump(user_data, f)
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка сохранения user_data: {e}")
+            return False
 
 # Загрузка данных при старте
 orders = DataManager.load_data(ORDERS_FILE)
 reviews = DataManager.load_data(REVIEWS_FILE)
 active_chats = DataManager.load_data(ACTIVE_CHATS_FILE)
+persistent_user_data = DataManager.load_user_data()
 
 def save_all_data():
     """Сохранение всех данных"""
     DataManager.save_data(ORDERS_FILE, orders)
     DataManager.save_data(REVIEWS_FILE, reviews)
     DataManager.save_data(ACTIVE_CHATS_FILE, active_chats)
+    logger.info("Все данные сохранены")
 
 async def periodic_save():
     """Периодическое сохранение данных"""
     while True:
-        await asyncio.sleep(300)  # Сохраняем каждые 5 минут
+        await asyncio.sleep(60)  # Сохраняем каждую минуту
         save_all_data()
-        logger.info("Данные сохранены")
+
+def get_order_by_id(order_id):
+    """Безопасное получение заказа по ID"""
+    if order_id in orders:
+        return orders[order_id]
+    
+    # Попробуем найти заказ по display_id
+    for oid, order in orders.items():
+        if order.get('order_display_id') == int(order_id):
+            return order
+        if str(order.get('order_display_id')) == order_id:
+            return order
+    
+    return None
+
+def get_order_id_by_display_id(display_id):
+    """Получить order_id по display_id"""
+    for order_id, order in orders.items():
+        if order.get('order_display_id') == display_id:
+            return order_id
+    return None
 
 # Клавиатура главного меню
 def main_menu_keyboard():
@@ -144,6 +190,11 @@ def back_to_seller_menu_keyboard(order_id):
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    
+    # Восстанавливаем user_data из persistent storage
+    if str(user.id) in persistent_user_data:
+        context.user_data.update(persistent_user_data[str(user.id)])
+    
     welcome_text = f"""
 ✨ *Добро пожаловать в бот по покупке звезд!* ✨
 
@@ -295,6 +346,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     try:
+        # Сохраняем user_data перед обработкой
+        persistent_user_data[str(user_id)] = dict(context.user_data)
+        DataManager.save_user_data(persistent_user_data)
+        
         if data == "help":
             await help_command(query, context)
         elif data == "buy_stars":
@@ -404,6 +459,8 @@ async def create_order(query, context: ContextTypes.DEFAULT_TYPE):
     
     # Сохраняем order_id в контексте пользователя
     context.user_data['current_order_id'] = order_id
+    persistent_user_data[str(user_id)] = dict(context.user_data)
+    DataManager.save_user_data(persistent_user_data)
     
     orders[order_id] = {
         'user_id': user_id,
@@ -415,6 +472,8 @@ async def create_order(query, context: ContextTypes.DEFAULT_TYPE):
         'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'order_display_id': order_display_id
     }
+    
+    save_all_data()
     
     cost = MIN_STARS * RATE
     text = f"""
@@ -439,16 +498,18 @@ async def create_order(query, context: ContextTypes.DEFAULT_TYPE):
 
 # Отмена заказа
 async def cancel_order(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await query.edit_message_text("❌ Заказ не найден!")
         return
     
-    order = orders[order_id]
     if order['user_id'] != query.from_user.id:
         await query.edit_message_text("❌ У вас нет прав для отмены этого заказа!")
         return
     
-    orders[order_id]['status'] = 'cancelled'
+    # Находим правильный order_id
+    actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
+    orders[actual_order_id]['status'] = 'cancelled'
     
     await query.edit_message_text(
         "❌ *Заказ отменен*\n\n"
@@ -456,15 +517,19 @@ async def cancel_order(query, context: ContextTypes.DEFAULT_TYPE, order_id):
         reply_markup=buy_stars_keyboard(),
         parse_mode='Markdown'
     )
+    save_all_data()
 
 # Изменение количества звезд
 async def change_amount(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await query.edit_message_text("❌ Заказ не найден!")
         return
     
     # Сохраняем order_id в контексте
     context.user_data['awaiting_stars_amount'] = order_id
+    persistent_user_data[str(query.from_user.id)] = dict(context.user_data)
+    DataManager.save_user_data(persistent_user_data)
     
     await query.edit_message_text(
         "🔢 *Введите новое количество звезд:*\n\n"
@@ -476,15 +541,18 @@ async def change_amount(query, context: ContextTypes.DEFAULT_TYPE, order_id):
 
 # Показать заказ с обновленными данными
 async def show_order_with_updated_amount(update, context, order_id, stars_amount):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await update.message.reply_text("❌ Заказ не найден!")
         return
     
-    orders[order_id]['stars_amount'] = stars_amount
+    # Находим правильный order_id
+    actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
+    orders[actual_order_id]['stars_amount'] = stars_amount
     cost = stars_amount * RATE
     
     text = f"""
-📋 *Создание заказа #{orders[order_id].get('order_display_id', 'N/A')}*
+📋 *Создание заказа #{orders[actual_order_id].get('order_display_id', 'N/A')}*
 
 ⭐ Количество звезд: {stars_amount}
 💰 Стоимость: {cost:.1f} рублей
@@ -499,32 +567,35 @@ async def show_order_with_updated_amount(update, context, order_id, stars_amount
     
     await update.message.reply_text(
         text,
-        reply_markup=order_creation_keyboard(order_id),
+        reply_markup=order_creation_keyboard(actual_order_id),
         parse_mode='Markdown'
     )
+    save_all_data()
 
 # Отправка заказа продавцу
 async def submit_order(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await query.edit_message_text("❌ Заказ не найден!")
         return
     
-    order = orders[order_id]
-    
     if order['stars_amount'] < MIN_STARS:
         cost = order['stars_amount'] * RATE
+        actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
         await query.edit_message_text(
             f"❌ *Ошибка!*\n\n"
             f"Покупка строго от {MIN_STARS} звезд!\n"
             f"Ваш заказ: {order['stars_amount']} звезд = {cost:.1f} руб.\n\n"
             f"Измените количество звезд.",
-            reply_markup=order_creation_keyboard(order_id),
+            reply_markup=order_creation_keyboard(actual_order_id),
             parse_mode='Markdown'
         )
         return
     
     # Сохраняем order_id в контексте для подтверждения username
     context.user_data['awaiting_username_confirmation'] = order_id
+    persistent_user_data[str(query.from_user.id)] = dict(context.user_data)
+    DataManager.save_user_data(persistent_user_data)
     
     # Просим подтвердить username
     await query.edit_message_text(
@@ -536,11 +607,11 @@ async def submit_order(query, context: ContextTypes.DEFAULT_TYPE, order_id):
 
 # Подтверждение username
 async def confirm_username(update, context, order_id, username_input):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await update.message.reply_text("❌ Заказ не найден!")
         return False
         
-    order = orders[order_id]
     original_username = order['username'] or ""
     
     # Убираем @ если пользователь его ввел
@@ -557,8 +628,10 @@ async def confirm_username(update, context, order_id, username_input):
         )
         return False
     else:
-        order['confirmed_username'] = cleaned_input
-        order['status'] = 'waiting_payment'
+        # Находим правильный order_id
+        actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
+        orders[actual_order_id]['confirmed_username'] = cleaned_input
+        orders[actual_order_id]['status'] = 'waiting_payment'
         
         cost = order['stars_amount'] * RATE
         
@@ -605,10 +678,10 @@ async def confirm_username(update, context, order_id, username_input):
             await context.bot.send_message(
                 chat_id=SELLER_ID,
                 text=seller_text,
-                reply_markup=seller_payment_keyboard(order_id),
+                reply_markup=seller_payment_keyboard(actual_order_id),
                 parse_mode='Markdown'
             )
-            logger.info(f"Уведомление отправлено продавцу {SELLER_ID} о заказе {order_id}")
+            logger.info(f"Уведомление отправлено продавцу {SELLER_ID} о заказе {actual_order_id}")
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления продавцу: {e}")
             await update.message.reply_text(
@@ -616,16 +689,18 @@ async def confirm_username(update, context, order_id, username_input):
                 parse_mode='Markdown'
             )
         
+        save_all_data()
         return True
 
 # Информация о заказе для продавца
 async def order_info(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await query.edit_message_text("❌ Заказ не найден!")
         return
     
-    order = orders[order_id]
     cost = order['stars_amount'] * RATE
+    actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
     
     info_text = f"""
 📋 *Информация о заказе #{order.get('order_display_id', 'N/A')}*
@@ -645,19 +720,21 @@ async def order_info(query, context: ContextTypes.DEFAULT_TYPE, order_id):
     
     await query.edit_message_text(
         info_text,
-        reply_markup=seller_payment_keyboard(order_id),
+        reply_markup=seller_payment_keyboard(actual_order_id),
         parse_mode='Markdown'
     )
 
 # Подтверждение оплаты продавцом
 async def payment_confirmed(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await query.edit_message_text("❌ Заказ не найден!")
         return
     
-    order = orders[order_id]
-    order['status'] = 'completed'
-    order['completed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # Находим правильный order_id
+    actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
+    orders[actual_order_id]['status'] = 'completed'
+    orders[actual_order_id]['completed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # Уведомление покупателю
     user_text = f"""
@@ -678,7 +755,7 @@ async def payment_confirmed(query, context: ContextTypes.DEFAULT_TYPE, order_id)
         await context.bot.send_message(
             chat_id=order['user_id'],
             text=user_text,
-            reply_markup=rating_keyboard(order_id),
+            reply_markup=rating_keyboard(actual_order_id),
             parse_mode='Markdown'
         )
         
@@ -689,7 +766,7 @@ async def payment_confirmed(query, context: ContextTypes.DEFAULT_TYPE, order_id)
             parse_mode='Markdown'
         )
         
-        logger.info(f"Оплата подтверждена для заказа {order_id}")
+        logger.info(f"Оплата подтверждена для заказа {actual_order_id}")
         
     except Exception as e:
         logger.error(f"Ошибка уведомления покупателя: {e}")
@@ -697,134 +774,21 @@ async def payment_confirmed(query, context: ContextTypes.DEFAULT_TYPE, order_id)
             f"✅ *Оплата подтверждена, но не удалось уведомить покупателя:* {e}",
             parse_mode='Markdown'
         )
-
-# Отклонение оплаты продавцом
-async def payment_not_received(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
-        await query.edit_message_text("❌ Заказ не найден!")
-        return
     
-    order = orders[order_id]
-    
-    # Уведомление покупателю
-    user_text = f"""
-❌ *Проблема с оплатой* 😔
-
-💸 *Продавец не получил вашу оплату.*
-
-⚠️ *Возможные причины:*
-• Деньги еще не поступили на счет
-• Неправильно указаны реквизиты
-• Предоставлена неверная квитанция
-
-📸 *Пожалуйста, проверьте и отправьте правильную квитанцию об оплате.*
-
-🔄 Если вы уверены, что оплатили правильно, свяжитесь с продавцом.
-    """
-    
-    try:
-        await context.bot.send_message(
-            chat_id=order['user_id'],
-            text=user_text,
-            parse_mode='Markdown'
-        )
-        
-        await query.edit_message_text(
-            f"❌ *Оплата не подтверждена*\n\n"
-            f"Покупатель @{order['confirmed_username']} уведомлен о проблеме с оплатой.",
-            parse_mode='Markdown'
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка уведомления покупателя: {e}")
-        await query.edit_message_text(
-            f"❌ *Оплата не подтверждена, но не удалось уведомить покупателя:* {e}",
-            parse_mode='Markdown'
-        )
-
-# Открытие чата с покупателем
-async def open_chat(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
-        await query.edit_message_text("❌ Заказ не найден!")
-        return
-    
-    order = orders[order_id]
-    
-    # Сохраняем информацию о активном чате
-    active_chats[str(query.from_user.id)] = {
-        'customer_id': order['user_id'],
-        'customer_username': order['confirmed_username'],
-        'customer_name': order['first_name'],
-        'order_id': order_id
-    }
-    
-    DataManager.save_data(ACTIVE_CHATS_FILE, active_chats)
-    
-    chat_info = f"""
-💬 *Чат с покупателем*
-
-👤 *Имя:* {order['first_name']}
-📛 *Username:* @{order['confirmed_username']}
-🆔 *ID:* {order['user_id']}
-
-⭐ *Заказано звезд:* {order['stars_amount']}
-💰 *Сумма:* {order['stars_amount'] * RATE:.1f} руб.
-
-📝 *Теперь вы можете написать сообщение покупателю.* 
-Просто введите текст и он будет отправлен.
-
-⚠️ *Внимание:* Не передавайте личные данные через бота.
-    """
-    
-    await query.edit_message_text(
-        chat_info,
-        reply_markup=back_to_seller_menu_keyboard(order_id),
-        parse_mode='Markdown'
-    )
-
-# Возврат к заказу из чата
-async def back_to_order(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
-        await query.edit_message_text("❌ Заказ не найден!")
-        return
-    
-    order = orders[order_id]
-    
-    # Очищаем активный чат
-    if str(query.from_user.id) in active_chats:
-        del active_chats[str(query.from_user.id)]
-        DataManager.save_data(ACTIVE_CHATS_FILE, active_chats)
-    
-    cost = order['stars_amount'] * RATE
-    order_text = f"""
-📋 *Заказ #{order.get('order_display_id', 'N/A')}*
-
-👤 *Покупатель:* {order['first_name']}
-📛 *Username:* @{order['confirmed_username']}
-🆔 *ID:* {order['user_id']}
-
-⭐ *Количество звезд:* {order['stars_amount']}
-💰 *Сумма:* {cost:.1f} рублей
-
-📊 *Статус:* {order['status']}
-    """
-    
-    await query.edit_message_text(
-        order_text,
-        reply_markup=seller_payment_keyboard(order_id),
-        parse_mode='Markdown'
-    )
+    save_all_data()
 
 # Обработка оценки
 async def handle_rating(query, context: ContextTypes.DEFAULT_TYPE, order_id, rating):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await query.edit_message_text("❌ Заказ не найден!")
         return
     
-    order = orders[order_id]
+    # Находим правильный order_id
+    actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
     
     # Сохраняем оценку
-    order['rating'] = rating
+    orders[actual_order_id]['rating'] = rating
     
     await query.edit_message_text(
         f"⭐ *Спасибо за оценку {rating} звезд!*\n\n"
@@ -834,15 +798,21 @@ async def handle_rating(query, context: ContextTypes.DEFAULT_TYPE, order_id, rat
     )
     
     # Сохраняем order_id в user_data для обработки отзыва
-    context.user_data['awaiting_review'] = order_id
+    context.user_data['awaiting_review'] = actual_order_id
+    persistent_user_data[str(query.from_user.id)] = dict(context.user_data)
+    DataManager.save_user_data(persistent_user_data)
+    
+    save_all_data()
 
 # Пропуск оценки
 async def skip_rating(query, context: ContextTypes.DEFAULT_TYPE, order_id):
-    if order_id not in orders:
+    order = get_order_by_id(order_id)
+    if not order:
         await query.edit_message_text("❌ Заказ не найден!")
         return
     
-    order = orders[order_id]
+    # Находим правильный order_id
+    actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
     
     await query.edit_message_text(
         "🙏 *Спасибо за покупку!*\n\n"
@@ -851,21 +821,23 @@ async def skip_rating(query, context: ContextTypes.DEFAULT_TYPE, order_id):
     )
     
     # Очищаем данные заказа
-    if order_id in orders:
-        del orders[order_id]
-        DataManager.save_data(ORDERS_FILE, orders)
+    if actual_order_id in orders:
+        del orders[actual_order_id]
+        save_all_data()
 
 # Обработка отзыва
 async def handle_review(update, context, order_id, review_text):
     try:
-        if order_id not in orders:
+        order = get_order_by_id(order_id)
+        if not order:
             await update.message.reply_text("❌ Заказ не найден!")
             return
         
-        order = orders[order_id]
+        # Находим правильный order_id
+        actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
         
         # Сохраняем отзыв
-        reviews[order_id] = {
+        reviews[actual_order_id] = {
             'user_id': order['user_id'],
             'username': order['confirmed_username'],
             'rating': order.get('rating', 0),
@@ -886,7 +858,7 @@ async def handle_review(update, context, order_id, review_text):
 💬 *Отзыв:*
 {review_text}
 
-🆔 *ID заказа:* {order_id}
+🆔 *ID заказа:* {actual_order_id}
 👤 *ID покупателя:* {order['user_id']}
         """
         
@@ -902,309 +874,308 @@ async def handle_review(update, context, order_id, review_text):
 
         await update.message.reply_text(
             "📝 *Спасибо за ваш отзыв!*\n\n"
-            "💫 Мы ценим ваше мнение и будем становиться лучше!\n\n"
-            "✨ *Желаем вам удачного дня и ждем снова!*",
+            "💫 Ваше мнение очень важно для нас!\n"
+            "✨ Ждем вас снова!",
             reply_markup=main_menu_keyboard(),
             parse_mode='Markdown'
         )
         
-        # Очищаем данные заказа после получения отзыва
-        if order_id in orders:
-            del orders[order_id]
-            DataManager.save_data(ORDERS_FILE, orders)
+        # Очищаем данные заказа после завершения
+        if actual_order_id in orders:
+            del orders[actual_order_id]
+            save_all_data()
             
     except Exception as e:
         logger.error(f"Ошибка обработки отзыва: {e}")
         await update.message.reply_text(
-            "❌ Произошла ошибка при сохранении отзыва. Попробуйте еще раз."
+            "❌ Произошла ошибка при сохранении отзыва.",
+            reply_markup=main_menu_keyboard()
         )
 
-# Обработка текстовых сообщений
+# Обработчик текстовых сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    message_text = update.message.text
+    message_text = update.message.text.strip()
+    
+    # Восстанавливаем user_data из persistent storage
+    if str(user_id) in persistent_user_data:
+        context.user_data.update(persistent_user_data[str(user_id)])
     
     try:
-        # Если продавец в активном чате с покупателем
-        if str(user_id) in active_chats and user_id == SELLER_ID:
-            chat_info = active_chats[str(user_id)]
-            customer_id = chat_info['customer_id']
-            
-            try:
-                # Пересылаем сообщение покупателю
-                await context.bot.send_message(
-                    chat_id=customer_id,
-                    text=f"💬 *Сообщение от продавца:*\n\n{message_text}",
-                    parse_mode='Markdown'
-                )
-                await update.message.reply_text(
-                    f"✅ *Сообщение отправлено покупателю*",
-                    parse_mode='Markdown'
-                )
-                logger.info(f"Продавец {user_id} отправил сообщение покупателю {customer_id}")
-            except Exception as e:
-                await update.message.reply_text(
-                    f"❌ *Не удалось отправить сообщение покупателю:* {e}",
-                    parse_mode='Markdown'
-                )
-            return
-        
-        # Если покупатель отвечает продавцу в активном чате
-        for seller_id_str, chat_info in active_chats.items():
-            if chat_info['customer_id'] == user_id:
-                seller_id = int(seller_id_str)
-                try:
-                    # Пересылаем сообщение продавцу
-                    await context.bot.send_message(
-                        chat_id=seller_id,
-                        text=f"💬 *Сообщение от покупателя:*\n\n"
-                             f"👤 {chat_info['customer_name']} (@{chat_info['customer_username']})\n"
-                             f"🆔 ID: {user_id}\n\n"
-                             f"{message_text}",
-                        parse_mode='Markdown'
-                    )
-                    await update.message.reply_text(
-                        f"✅ *Сообщение отправлено продавцу*",
-                        parse_mode='Markdown'
-                    )
-                    logger.info(f"Покупатель {user_id} отправил сообщение продавцу {seller_id}")
-                except Exception as e:
-                    await update.message.reply_text(
-                        f"❌ *Не удалось отправить сообщение продавцу:* {e}",
-                        parse_mode='Markdown'
-                    )
-                return
-        
         # Обработка ввода количества звезд
         if 'awaiting_stars_amount' in context.user_data:
             order_id = context.user_data['awaiting_stars_amount']
             
             try:
-                stars_amount = int(message_text.strip())
+                stars_amount = int(message_text)
                 if stars_amount < MIN_STARS:
                     await update.message.reply_text(
-                        f"❌ *Ошибка! Минимальное количество: {MIN_STARS} звезд*\n\n"
-                        f"Пожалуйста, введите число больше или равное {MIN_STARS}:",
-                        parse_mode='Markdown'
+                        f"❌ Минимальное количество звезд: {MIN_STARS}\n"
+                        f"Пожалуйста, введите число больше или равное {MIN_STARS}:"
                     )
                     return
                 
-                # Показываем обновленный заказ
-                await show_order_with_updated_amount(update, context, order_id, stars_amount)
+                # Очищаем состояние
                 del context.user_data['awaiting_stars_amount']
+                persistent_user_data[str(user_id)] = dict(context.user_data)
+                DataManager.save_user_data(persistent_user_data)
+                
+                await show_order_with_updated_amount(update, context, order_id, stars_amount)
                 
             except ValueError:
                 await update.message.reply_text(
-                    f"❌ *Неверный формат!*\n\n"
-                    f"Пожалуйста, введите целое число (например: 100, 250, 500):",
-                    parse_mode='Markdown'
+                    "❌ Пожалуйста, введите корректное число:\n"
+                    "Пример: 100, 250, 500"
                 )
             return
         
         # Обработка подтверждения username
-        if 'awaiting_username_confirmation' in context.user_data:
+        elif 'awaiting_username_confirmation' in context.user_data:
             order_id = context.user_data['awaiting_username_confirmation']
+            
+            # Очищаем состояние независимо от результата
+            del context.user_data['awaiting_username_confirmation']
+            persistent_user_data[str(user_id)] = dict(context.user_data)
+            DataManager.save_user_data(persistent_user_data)
+            
             success = await confirm_username(update, context, order_id, message_text)
             if success:
-                del context.user_data['awaiting_username_confirmation']
+                # После успешного подтверждения username, ждем скриншот оплаты
+                context.user_data['awaiting_payment_screenshot'] = order_id
+                persistent_user_data[str(user_id)] = dict(context.user_data)
+                DataManager.save_user_data(persistent_user_data)
             return
         
         # Обработка отзыва
-        if 'awaiting_review' in context.user_data:
+        elif 'awaiting_review' in context.user_data:
             order_id = context.user_data['awaiting_review']
+            
+            # Очищаем состояние
+            del context.user_data['awaiting_review']
+            persistent_user_data[str(user_id)] = dict(context.user_data)
+            DataManager.save_user_data(persistent_user_data)
+            
             await handle_review(update, context, order_id, message_text)
-            if 'awaiting_review' in context.user_data:
-                del context.user_data['awaiting_review']
             return
         
-        # Если сообщение не обработано другими обработчиками
+        # Обработка скриншотов оплаты
+        elif 'awaiting_payment_screenshot' in context.user_data:
+            order_id = context.user_data['awaiting_payment_screenshot']
+            order = get_order_by_id(order_id)
+            
+            if order and update.message.photo:
+                # Пересылаем скриншот продавцу
+                try:
+                    # Отправляем уведомление продавцу о скриншоте
+                    screenshot_notification = f"""
+📸 *Покупатель отправил скриншот оплаты!*
+
+🆔 *Заказ #*{order.get('order_display_id', 'N/A')}
+👤 *Покупатель:* {order['first_name']} (@{order['confirmed_username']})
+
+💬 *Сообщение покупателя:* {message_text if message_text else 'Без текста'}
+                    """
+                    
+                    # Пересылаем фото продавцу
+                    await context.bot.send_photo(
+                        chat_id=SELLER_ID,
+                        photo=update.message.photo[-1].file_id,
+                        caption=screenshot_notification,
+                        parse_mode='Markdown',
+                        reply_markup=seller_payment_keyboard(order_id)
+                    )
+                    
+                    await update.message.reply_text(
+                        "✅ *Скриншот отправлен продавцу!*\n\n"
+                        "⏳ Ожидайте подтверждения оплаты.\n"
+                        "Обычно это занимает 5-15 минут.",
+                        parse_mode='Markdown'
+                    )
+                    
+                    # Очищаем состояние
+                    del context.user_data['awaiting_payment_screenshot']
+                    persistent_user_data[str(user_id)] = dict(context.user_data)
+                    DataManager.save_user_data(persistent_user_data)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка отправки скриншота продавцу: {e}")
+                    await update.message.reply_text(
+                        "❌ Не удалось отправить скриншот продавцу. Попробуйте еще раз или свяжитесь напрямую."
+                    )
+            return
+        
+        # Обработка сообщений в активных чатах
+        elif str(user_id) in active_chats:
+            target_user_id = active_chats[str(user_id)]
+            try:
+                # Пересылаем сообщение
+                if update.message.text:
+                    await context.bot.send_message(
+                        chat_id=target_user_id,
+                        text=f"💬 *Сообщение от {'продавца' if user_id == SELLER_ID else 'покупателя'}:*\n\n{message_text}",
+                        parse_mode='Markdown'
+                    )
+                    await update.message.reply_text("✅ Сообщение отправлено!")
+                elif update.message.photo:
+                    await context.bot.send_photo(
+                        chat_id=target_user_id,
+                        photo=update.message.photo[-1].file_id,
+                        caption=f"📸 *Фото от {'продавца' if user_id == SELLER_ID else 'покупателя'}:*\n\n{message_text}" if message_text else f"📸 Фото от {'продавца' if user_id == SELLER_ID else 'покупателя'}",
+                        parse_mode='Markdown'
+                    )
+                    await update.message.reply_text("✅ Фото отправлено!")
+            except Exception as e:
+                logger.error(f"Ошибка пересылки сообщения: {e}")
+                await update.message.reply_text("❌ Не удалось отправить сообщение.")
+            return
+        
+        # Если ни одно условие не выполнено, показываем главное меню
         await update.message.reply_text(
-            "🤔 *Не понял ваше сообщение*\n\n"
-            "Пожалуйста, используйте кнопки меню для навигации:",
-            reply_markup=main_menu_keyboard(),
+            "Выберите действие:",
+            reply_markup=main_menu_keyboard()
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике сообщений: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
+            reply_markup=main_menu_keyboard()
+        )
+
+# Открытие чата с покупателем (для продавца)
+async def open_chat(query, context: ContextTypes.DEFAULT_TYPE, order_id):
+    if query.from_user.id != SELLER_ID:
+        await query.answer("❌ Эта функция только для продавца!", show_alert=True)
+        return
+    
+    order = get_order_by_id(order_id)
+    if not order:
+        await query.edit_message_text("❌ Заказ не найден!")
+        return
+    
+    user_id = order['user_id']
+    
+    # Сохраняем активный чат
+    active_chats[str(SELLER_ID)] = user_id
+    active_chats[str(user_id)] = SELLER_ID
+    
+    DataManager.save_data(ACTIVE_CHATS_FILE, active_chats)
+    
+    await query.edit_message_text(
+        f"💬 *Чат открыт с покупателем:*\n\n"
+        f"👤 {order['first_name']} (@{order['confirmed_username']})\n"
+        f"🆔 ID: {user_id}\n\n"
+        f"📋 *Заказ #*{order.get('order_display_id', 'N/A')}\n"
+        f"⭐ Звезд: {order['stars_amount']}\n\n"
+        f"✉️ *Теперь вы можете обмениваться сообщениями.*\n"
+        f"❌ *Чтобы закрыть чат, отправьте /close_chat*",
+        parse_mode='Markdown'
+    )
+    
+    # Уведомляем покупателя
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"💬 *Продавец открыл чат с вами!*\n\n"
+                 f"✉️ Теперь вы можете общаться напрямую.\n"
+                 f"❌ Чтобы закрыть чат, отправьте /close_chat",
             parse_mode='Markdown'
         )
-        
     except Exception as e:
-        logger.error(f"Ошибка обработки сообщения: {e}")
-        await update.message.reply_text(
-            "❌ Произошла ошибка при обработке сообщения. Попробуйте еще раз."
-        )
+        logger.error(f"Ошибка уведомления покупателя об открытии чата: {e}")
 
-# Обработка документов (скриншотов оплаты)
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Команда для закрытия чата
+async def close_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    try:
-        # Ищем активные заказы пользователя в статусе ожидания оплаты
-        user_orders = [order for order in orders.values() 
-                      if order['user_id'] == user_id and order.get('status') == 'waiting_payment']
+    if str(user_id) in active_chats:
+        target_user_id = active_chats[str(user_id)]
         
-        if not user_orders:
-            await update.message.reply_text(
-                "❌ *У вас нет заказов, ожидающих оплаты*\n\n"
-                "Сначала создайте заказ через меню покупки звезд.",
-                parse_mode='Markdown'
-            )
-            return
+        # Удаляем из активных чатов
+        del active_chats[str(user_id)]
+        if str(target_user_id) in active_chats:
+            del active_chats[str(target_user_id)]
         
-        # Берем последний заказ
-        latest_order = user_orders[-1]
-        order_id = next(oid for oid, order in orders.items() if order == latest_order)
+        DataManager.save_data(ACTIVE_CHATS_FILE, active_chats)
         
-        # Уведомляем продавца о получении скриншота
-        document = update.message.document
-        file_id = document.file_id
+        await update.message.reply_text("❌ Чат закрыт.")
         
-        seller_text = f"""
-📸 *Получен скриншот оплаты*
-
-👤 *Покупатель:* {latest_order['first_name']}
-📛 *Username:* @{latest_order['confirmed_username']}
-🆔 *ID:* {user_id}
-
-⭐ *Заказ #*{latest_order.get('order_display_id', 'N/A')}
-💰 *Сумма:* {latest_order['stars_amount'] * RATE:.1f} руб.
-
-⏰ *Время отправки:* {update.message.date}
-        """
-        
+        # Уведомляем второго участника
         try:
-            # Пересылаем документ продавцу
-            await context.bot.send_document(
-                chat_id=SELLER_ID,
-                document=file_id,
-                caption=seller_text,
-                reply_markup=seller_payment_keyboard(order_id),
-                parse_mode='Markdown'
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text="❌ Чат закрыт второй стороной."
             )
-            
-            await update.message.reply_text(
-                "✅ *Скриншот отправлен продавцу!*\n\n"
-                "⏳ *Ожидайте подтверждения оплаты*\n\n"
-                "Продавец проверит платеж и подтвердит получение средств.",
-                parse_mode='Markdown'
-            )
-            
-            logger.info(f"Скриншот оплаты отправлен продавцу для заказа {order_id}")
-            
         except Exception as e:
-            logger.error(f"Ошибка отправки скриншота продавцу: {e}")
-            await update.message.reply_text(
-                "❌ *Не удалось отправить скриншот продавцу*\n\n"
-                "Пожалуйста, попробуйте еще раз или свяжитесь с продавцом напрямую.",
-                parse_mode='Markdown'
-            )
-            
-    except Exception as e:
-        logger.error(f"Ошибка обработки документа: {e}")
-        await update.message.reply_text(
-            "❌ Произошла ошибка при обработке скриншота. Попробуйте еще раз."
-        )
+            logger.error(f"Ошибка уведомления о закрытии чата: {e}")
+    else:
+        await update.message.reply_text("У вас нет активных чатов.")
 
-# Обработка фото (альтернатива документам)
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+# Возврат к заказу (для продавца)
+async def back_to_order(query, context: ContextTypes.DEFAULT_TYPE, order_id):
+    if query.from_user.id != SELLER_ID:
+        await query.answer("❌ Эта функция только для продавца!", show_alert=True)
+        return
     
-    try:
-        # Ищем активные заказы пользователя в статусе ожидания оплаты
-        user_orders = [order for order in orders.values() 
-                      if order['user_id'] == user_id and order.get('status') == 'waiting_payment']
-        
-        if not user_orders:
-            await update.message.reply_text(
-                "❌ *У вас нет заказов, ожидающих оплаты*\n\n"
-                "Сначала создайте заказ через меню покупки звезд.",
-                parse_mode='Markdown'
-            )
-            return
-        
-        # Берем последний заказ
-        latest_order = user_orders[-1]
-        order_id = next(oid for oid, order in orders.items() if order == latest_order)
-        
-        # Уведомляем продавца о получении фото
-        photo = update.message.photo[-1]  # Берем самое качественное фото
-        file_id = photo.file_id
-        
-        seller_text = f"""
-📸 *Получено фото оплаты*
+    order = get_order_by_id(order_id)
+    if not order:
+        await query.edit_message_text("❌ Заказ не найден!")
+        return
+    
+    cost = order['stars_amount'] * RATE
+    actual_order_id = get_order_id_by_display_id(order['order_display_id']) or order_id
+    
+    order_text = f"""
+🎯 *Заказ #{order.get('order_display_id', 'N/A')}*
 
-👤 *Покупатель:* {latest_order['first_name']}
-📛 *Username:* @{latest_order['confirmed_username']}
-🆔 *ID:* {user_id}
+👤 *Покупатель:* {order['first_name']}
+📛 *Username:* @{order['confirmed_username']}
+🆔 *ID:* {order['user_id']}
 
-⭐ *Заказ #*{latest_order.get('order_display_id', 'N/A')}
-💰 *Сумма:* {latest_order['stars_amount'] * RATE:.1f} руб.
+⭐ *Количество звезд:* {order['stars_amount']}
+💰 *Сумма:* {cost:.1f} рублей
 
-⏰ *Время отправки:* {update.message.date}
-        """
-        
-        try:
-            # Пересылаем фото продавцу
-            await context.bot.send_photo(
-                chat_id=SELLER_ID,
-                photo=file_id,
-                caption=seller_text,
-                reply_markup=seller_payment_keyboard(order_id),
-                parse_mode='Markdown'
-            )
-            
-            await update.message.reply_text(
-                "✅ *Фото отправлено продавцу!*\n\n"
-                "⏳ *Ожидайте подтверждения оплаты*\n\n"
-                "Продавец проверит платеж и подтвердит получение средств.",
-                parse_mode='Markdown'
-            )
-            
-            logger.info(f"Фото оплаты отправлено продавцу для заказа {order_id}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка отправки фото продавцу: {e}")
-            await update.message.reply_text(
-                "❌ *Не удалось отправить фото продавцу*\n\n"
-                "Пожалуйста, попробуйте еще раз или свяжитесь с продавцом напрямую.",
-                parse_mode='Markdown'
-            )
-            
-    except Exception as e:
-        logger.error(f"Ошибка обработки фото: {e}")
-        await update.message.reply_text(
-            "❌ Произошла ошибка при обработке фото. Попробуйте еще раз."
-        )
+📊 *Статус:* {order.get('status', 'unknown')}
+🕐 *Создан:* {order.get('created_at', 'N/A')}
+    """
+    
+    await query.edit_message_text(
+        order_text,
+        reply_markup=seller_payment_keyboard(actual_order_id),
+        parse_mode='Markdown'
+    )
 
-# Обработка ошибок
+# Обработчик ошибок
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
-    logger.error(f"Ошибка при обработке обновления {update}: {context.error}")
+    logger.error(f"Exception while handling an update: {context.error}")
     
-    try:
-        # Уведомляем пользователя об ошибке
-        if update and update.effective_user:
-            await context.bot.send_message(
-                chat_id=update.effective_user.id,
-                text="❌ Произошла непредвиденная ошибка. Пожалуйста, попробуйте еще раз."
-            )
-    except Exception as e:
-        logger.error(f"Ошибка при уведомлении пользователя: {e}")
+    # Сохраняем все данные при ошибке
+    save_all_data()
+
+# Функция для безопасного завершения
+async def shutdown():
+    """Функция для безопасного завершения работы"""
+    logger.info("Бот завершает работу...")
+    save_all_data()
+    logger.info("Все данные сохранены. Бот отключен.")
 
 # Основная функция
 def main():
     """Запуск бота"""
-    # Создаем приложение
+    # Создаем Application
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("close_chat", close_chat))
     application.add_handler(CommandHandler("stats", stats_command))
     
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_message))
     
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
+    # Обработчик ошибок
     application.add_error_handler(error_handler)
     
     # Запускаем периодическое сохранение данных
@@ -1213,11 +1184,10 @@ def main():
     
     # Запускаем бота
     logger.info("Бот запущен!")
-    print("🤖 Бот запущен и готов к работе!")
-    print("⚡ Используйте Ctrl+C для остановки")
+    application.run_polling()
     
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # При завершении работы сохраняем данные
+    loop.run_until_complete(shutdown())
 
 if __name__ == "__main__":
     main()
-
