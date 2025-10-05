@@ -106,7 +106,7 @@ def order_creation_keyboard(order_id):
         [InlineKeyboardButton("🔄 Изменить количество звезд", callback_data=f"change_amount:{order_id}")],
         [InlineKeyboardButton("📤 Отправить заказ", callback_data=f"submit_order:{order_id}")],
         [InlineKeyboardButton("❌ Отменить заказ", callback_data=f"cancel_order:{order_id}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="buy_stars")]
+        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_buy_stars")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -303,6 +303,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await create_order(query, context)
         elif data == "back_to_main":
             await back_to_main(query, context)
+        elif data == "back_to_buy_stars":
+            await buy_stars_menu(query, context)
         elif data == "stats":
             await stats_command(update, context)
         elif data == "my_orders":
@@ -369,14 +371,43 @@ async def buy_stars_menu(query, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+# Возврат в главное меню
+async def back_to_main(query, context: ContextTypes.DEFAULT_TYPE):
+    user = query.from_user
+    welcome_text = f"""
+✨ *Добро пожаловать в бот по покупке звезд!* ✨
+
+Привет, {user.first_name}! 🎉
+
+🌟 *Что у нас есть:*
+• Покупка Telegram Stars по выгодному курсу
+• Мгновенное получение звезд
+• Безопасные сделки
+• Поддержка 24/7
+
+💫 *Курс:* 1 звезда = {RATE} рубля
+
+🚀 *Начните покупку звезд прямо сейчас!*
+    """
+    
+    await query.edit_message_text(
+        welcome_text,
+        reply_markup=main_menu_keyboard(),
+        parse_mode='Markdown'
+    )
+
 # Создание заказа
 async def create_order(query, context: ContextTypes.DEFAULT_TYPE):
-    order_id = str(query.from_user.id) + "_" + str(int(datetime.now().timestamp()))
+    user_id = query.from_user.id
+    order_id = f"{user_id}_{int(datetime.now().timestamp())}"
     order_display_id = len(orders) + 1
     
+    # Сохраняем order_id в контексте пользователя
+    context.user_data['current_order_id'] = order_id
+    
     orders[order_id] = {
-        'user_id': query.from_user.id,
-        'username': query.from_user.username,
+        'user_id': user_id,
+        'username': query.from_user.username or "",
         'first_name': query.from_user.first_name,
         'stars_amount': MIN_STARS,
         'status': 'creating',
@@ -432,6 +463,9 @@ async def change_amount(query, context: ContextTypes.DEFAULT_TYPE, order_id):
         await query.edit_message_text("❌ Заказ не найден!")
         return
     
+    # Сохраняем order_id в контексте
+    context.user_data['awaiting_stars_amount'] = order_id
+    
     await query.edit_message_text(
         "🔢 *Введите новое количество звезд:*\n\n"
         f"⚠️ Минимальное количество: {MIN_STARS} звезд\n"
@@ -439,8 +473,6 @@ async def change_amount(query, context: ContextTypes.DEFAULT_TYPE, order_id):
         f"💰 *Расчет будет:* ваше число × {RATE} руб.",
         parse_mode='Markdown'
     )
-    
-    context.user_data['awaiting_stars_amount'] = order_id
 
 # Показать заказ с обновленными данными
 async def show_order_with_updated_amount(update, context, order_id, stars_amount):
@@ -491,6 +523,9 @@ async def submit_order(query, context: ContextTypes.DEFAULT_TYPE, order_id):
         )
         return
     
+    # Сохраняем order_id в контексте для подтверждения username
+    context.user_data['awaiting_username_confirmation'] = order_id
+    
     # Просим подтвердить username
     await query.edit_message_text(
         "👤 *Подтвердите ваш username:*\n\n"
@@ -498,13 +533,15 @@ async def submit_order(query, context: ContextTypes.DEFAULT_TYPE, order_id):
         "📝 Пожалуйста, напишите ваш username еще раз для подтверждения:",
         parse_mode='Markdown'
     )
-    
-    context.user_data['awaiting_username_confirmation'] = order_id
 
 # Подтверждение username
 async def confirm_username(update, context, order_id, username_input):
+    if order_id not in orders:
+        await update.message.reply_text("❌ Заказ не найден!")
+        return False
+        
     order = orders[order_id]
-    original_username = order['username']
+    original_username = order['username'] or ""
     
     # Убираем @ если пользователь его ввел
     cleaned_input = username_input.replace('@', '').strip()
@@ -860,43 +897,18 @@ async def handle_review(update, context, order_id, review_text):
                 text=review_message,
                 parse_mode='Markdown'
             )
-        except Exception as e:
+                except Exception as e:
             logger.error(f"Ошибка отправки отзыва продавцу: {e}")
-        
-        # Успешное сообщение покупателю
-        success_text = f"""
-✅ *Отзыв успешно отправлен!* 🎉
 
-⭐ *Ваша оценка:* {order.get('rating', 0)} звезд
-💬 *Ваш отзыв:* {review_text}
-
-🙏 *Спасибо за ваше мнение!* 
-Ваш отзыв очень важен для нас и поможет стать лучше!
-
-✨ *Желаем вам удачного дня и ждем снова!*
-        """
-        
         await update.message.reply_text(
-            success_text,
+            "📝 *Спасибо за ваш отзыв!*\n\n"
+            "💫 Мы ценим ваше мнение и будем становиться лучше!\n\n"
+            "✨ *Желаем вам удачного дня и ждем снова!*",
+            reply_markup=main_menu_keyboard(),
             parse_mode='Markdown'
         )
         
-        # Очищаем данные заказа
-        if order_id in orders:
-            del orders[order_id]
-            DataManager.save_data(ORDERS_FILE, orders)
-            
-        logger.info(f"Отзыв отправлен от пользователя {order['user_id']}")
-            
-    except Exception as e:
-        logger.error(f"Ошибка отправки отзыва: {e}")
-        # В случае ошибки все равно показываем успешное сообщение пользователю
-        await update.message.reply_text(
-            "✅ *Отзыв успешно отправлен!*\n\nСпасибо за ваше мнение!",
-            parse_mode='Markdown'
-        )
-        
-        # Очищаем данные заказа
+        # Очищаем данные заказа после получения отзыва
         if order_id in orders:
             del orders[order_id]
             DataManager.save_data(ORDERS_FILE, orders)
@@ -904,138 +916,277 @@ async def handle_review(update, context, order_id, review_text):
     except Exception as e:
         logger.error(f"Ошибка обработки отзыва: {e}")
         await update.message.reply_text(
-            "❌ Произошла ошибка при отправке отзыва. Попробуйте еще раз.",
-            parse_mode='Markdown'
+            "❌ Произошла ошибка при сохранении отзыва. Попробуйте еще раз."
         )
 
-# Возврат в главное меню
-async def back_to_main(query, context: ContextTypes.DEFAULT_TYPE):
-    user = query.from_user
-    welcome_text = f"""
-✨ *Добро пожаловать в бот по покупке звезд!* ✨
-
-Привет, {user.first_name}! 🎉
-
-🌟 *Что у нас есть:*
-• Покупка Telegram Stars по выгодному курсу
-• Мгновенное получение звезд
-• Безопасные сделки
-• Поддержка 24/7
-
-💫 *Курс:* 1 звезда = {RATE} рубля
-
-🚀 *Начните покупку звезд прямо сейчас!*
-    """
-    
-    await query.edit_message_text(
-        welcome_text,
-        reply_markup=main_menu_keyboard(),
-        parse_mode='Markdown'
-    )
-
-# Обработчик текстовых сообщений
+# Обработка текстовых сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     message_text = update.message.text
     
-    # Проверяем, ожидаем ли мы подтверждение username
-    if 'awaiting_username_confirmation' in context.user_data:
-        order_id = context.user_data['awaiting_username_confirmation']
-        success = await confirm_username(update, context, order_id, message_text)
-        if success:
-            del context.user_data['awaiting_username_confirmation']
-        return
-    
-    # Проверяем, ожидаем ли мы количество звезд
-    elif 'awaiting_stars_amount' in context.user_data:
-        order_id = context.user_data['awaiting_stars_amount']
-        try:
-            stars_amount = int(message_text)
-            if stars_amount >= MIN_STARS:
-                await show_order_with_updated_amount(update, context, order_id, stars_amount)
-                del context.user_data['awaiting_stars_amount']
-            else:
-                await update.message.reply_text(
-                    f"❌ *Минимальное количество звезд: {MIN_STARS}*\n\n"
-                    f"Пожалуйста, введите число больше или равное {MIN_STARS}:",
+    try:
+        # Если продавец в активном чате с покупателем
+        if str(user_id) in active_chats and user_id == SELLER_ID:
+            chat_info = active_chats[str(user_id)]
+            customer_id = chat_info['customer_id']
+            
+            try:
+                # Пересылаем сообщение покупателю
+                await context.bot.send_message(
+                    chat_id=customer_id,
+                    text=f"💬 *Сообщение от продавца:*\n\n{message_text}",
                     parse_mode='Markdown'
                 )
-        except ValueError:
-            await update.message.reply_text(
-                "❌ *Пожалуйста, введите корректное число*\n\n"
-                f"Пример: 100, 250, 500 (минимум {MIN_STARS})",
-                parse_mode='Markdown'
-            )
-        return
-    
-    # Проверяем, ожидаем ли мы отзыв
-    elif 'awaiting_review' in context.user_data:
-        order_id = context.user_data['awaiting_review']
-        await handle_review(update, context, order_id, message_text)
-        del context.user_data['awaiting_review']
-        return
-    
-    # Проверяем, является ли отправитель продавцом в активном чате
-    elif str(user_id) in active_chats and user_id == SELLER_ID:
-        chat_info = active_chats[str(user_id)]
-        customer_id = chat_info['customer_id']
+                await update.message.reply_text(
+                    f"✅ *Сообщение отправлено покупателю*",
+                    parse_mode='Markdown'
+                )
+                logger.info(f"Продавец {user_id} отправил сообщение покупателю {customer_id}")
+            except Exception as e:
+                await update.message.reply_text(
+                    f"❌ *Не удалось отправить сообщение покупателю:* {e}",
+                    parse_mode='Markdown'
+                )
+            return
         
-        try:
-            # Отправляем сообщение покупателю
-            seller_message = f"""
-💬 *Сообщение от продавца:*
+        # Если покупатель отвечает продавцу в активном чате
+        for seller_id_str, chat_info in active_chats.items():
+            if chat_info['customer_id'] == user_id:
+                seller_id = int(seller_id_str)
+                try:
+                    # Пересылаем сообщение продавцу
+                    await context.bot.send_message(
+                        chat_id=seller_id,
+                        text=f"💬 *Сообщение от покупателя:*\n\n"
+                             f"👤 {chat_info['customer_name']} (@{chat_info['customer_username']})\n"
+                             f"🆔 ID: {user_id}\n\n"
+                             f"{message_text}",
+                        parse_mode='Markdown'
+                    )
+                    await update.message.reply_text(
+                        f"✅ *Сообщение отправлено продавцу*",
+                        parse_mode='Markdown'
+                    )
+                    logger.info(f"Покупатель {user_id} отправил сообщение продавцу {seller_id}")
+                except Exception as e:
+                    await update.message.reply_text(
+                        f"❌ *Не удалось отправить сообщение продавцу:* {e}",
+                        parse_mode='Markdown'
+                    )
+                return
+        
+        # Обработка ввода количества звезд
+        if 'awaiting_stars_amount' in context.user_data:
+            order_id = context.user_data['awaiting_stars_amount']
+            
+            try:
+                stars_amount = int(message_text.strip())
+                if stars_amount < MIN_STARS:
+                    await update.message.reply_text(
+                        f"❌ *Ошибка! Минимальное количество: {MIN_STARS} звезд*\n\n"
+                        f"Пожалуйста, введите число больше или равное {MIN_STARS}:",
+                        parse_mode='Markdown'
+                    )
+                    return
+                
+                # Показываем обновленный заказ
+                await show_order_with_updated_amount(update, context, order_id, stars_amount)
+                del context.user_data['awaiting_stars_amount']
+                
+            except ValueError:
+                await update.message.reply_text(
+                    f"❌ *Неверный формат!*\n\n"
+                    f"Пожалуйста, введите целое число (например: 100, 250, 500):",
+                    parse_mode='Markdown'
+                )
+            return
+        
+        # Обработка подтверждения username
+        if 'awaiting_username_confirmation' in context.user_data:
+            order_id = context.user_data['awaiting_username_confirmation']
+            success = await confirm_username(update, context, order_id, message_text)
+            if success:
+                del context.user_data['awaiting_username_confirmation']
+            return
+        
+        # Обработка отзыва
+        if 'awaiting_review' in context.user_data:
+            order_id = context.user_data['awaiting_review']
+            await handle_review(update, context, order_id, message_text)
+            if 'awaiting_review' in context.user_data:
+                del context.user_data['awaiting_review']
+            return
+        
+        # Если сообщение не обработано другими обработчиками
+        await update.message.reply_text(
+            "🤔 *Не понял ваше сообщение*\n\n"
+            "Пожалуйста, используйте кнопки меню для навигации:",
+            reply_markup=main_menu_keyboard(),
+            parse_mode='Markdown'
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки сообщения: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при обработке сообщения. Попробуйте еще раз."
+        )
 
-{message_text}
-
----
-📦 *Заказ #{orders[chat_info['order_id']].get('order_display_id', 'N/A')}*
-            """
-            
-            await context.bot.send_message(
-                chat_id=customer_id,
-                text=seller_message,
-                parse_mode='Markdown'
-            )
-            
-            # Подтверждаем продавцу
-            await update.message.reply_text(
-                f"✅ *Сообщение отправлено покупателю*\n\n"
-                f"👤 {chat_info['customer_name']} (@{chat_info['customer_username']})",
-                parse_mode='Markdown'
-            )
-            
-            logger.info(f"Сообщение от продавца {user_id} отправлено покупателю {customer_id}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка отправки сообщения покупателю: {e}")
-            await update.message.reply_text(
-                f"❌ *Не удалось отправить сообщение:* {e}",
-                parse_mode='Markdown'
-            )
-        return
-    
-    # Обычное сообщение - показываем главное меню
-    await update.message.reply_text(
-        "🤖 *Бот по покупке звезд*\n\n"
-        "Выберите действие в меню ниже:",
-        reply_markup=main_menu_keyboard(),
-        parse_mode='Markdown'
-    )
-
-# Обработчик ошибок
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ошибок"""
-    logger.error(f"Ошибка: {context.error}", exc_info=context.error)
+# Обработка документов (скриншотов оплаты)
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     
     try:
-        # Пытаемся уведомить пользователя об ошибке
+        # Ищем активные заказы пользователя в статусе ожидания оплаты
+        user_orders = [order for order in orders.values() 
+                      if order['user_id'] == user_id and order.get('status') == 'waiting_payment']
+        
+        if not user_orders:
+            await update.message.reply_text(
+                "❌ *У вас нет заказов, ожидающих оплаты*\n\n"
+                "Сначала создайте заказ через меню покупки звезд.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Берем последний заказ
+        latest_order = user_orders[-1]
+        order_id = next(oid for oid, order in orders.items() if order == latest_order)
+        
+        # Уведомляем продавца о получении скриншота
+        document = update.message.document
+        file_id = document.file_id
+        
+        seller_text = f"""
+📸 *Получен скриншот оплаты*
+
+👤 *Покупатель:* {latest_order['first_name']}
+📛 *Username:* @{latest_order['confirmed_username']}
+🆔 *ID:* {user_id}
+
+⭐ *Заказ #*{latest_order.get('order_display_id', 'N/A')}
+💰 *Сумма:* {latest_order['stars_amount'] * RATE:.1f} руб.
+
+⏰ *Время отправки:* {update.message.date}
+        """
+        
+        try:
+            # Пересылаем документ продавцу
+            await context.bot.send_document(
+                chat_id=SELLER_ID,
+                document=file_id,
+                caption=seller_text,
+                reply_markup=seller_payment_keyboard(order_id),
+                parse_mode='Markdown'
+            )
+            
+            await update.message.reply_text(
+                "✅ *Скриншот отправлен продавцу!*\n\n"
+                "⏳ *Ожидайте подтверждения оплаты*\n\n"
+                "Продавец проверит платеж и подтвердит получение средств.",
+                parse_mode='Markdown'
+            )
+            
+            logger.info(f"Скриншот оплаты отправлен продавцу для заказа {order_id}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки скриншота продавцу: {e}")
+            await update.message.reply_text(
+                "❌ *Не удалось отправить скриншот продавцу*\n\n"
+                "Пожалуйста, попробуйте еще раз или свяжитесь с продавцом напрямую.",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка обработки документа: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при обработке скриншота. Попробуйте еще раз."
+        )
+
+# Обработка фото (альтернатива документам)
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    try:
+        # Ищем активные заказы пользователя в статусе ожидания оплаты
+        user_orders = [order for order in orders.values() 
+                      if order['user_id'] == user_id and order.get('status') == 'waiting_payment']
+        
+        if not user_orders:
+            await update.message.reply_text(
+                "❌ *У вас нет заказов, ожидающих оплаты*\n\n"
+                "Сначала создайте заказ через меню покупки звезд.",
+                parse_mode='Markdown'
+            )
+            return
+        
+        # Берем последний заказ
+        latest_order = user_orders[-1]
+        order_id = next(oid for oid, order in orders.items() if order == latest_order)
+        
+        # Уведомляем продавца о получении фото
+        photo = update.message.photo[-1]  # Берем самое качественное фото
+        file_id = photo.file_id
+        
+        seller_text = f"""
+📸 *Получено фото оплаты*
+
+👤 *Покупатель:* {latest_order['first_name']}
+📛 *Username:* @{latest_order['confirmed_username']}
+🆔 *ID:* {user_id}
+
+⭐ *Заказ #*{latest_order.get('order_display_id', 'N/A')}
+💰 *Сумма:* {latest_order['stars_amount'] * RATE:.1f} руб.
+
+⏰ *Время отправки:* {update.message.date}
+        """
+        
+        try:
+            # Пересылаем фото продавцу
+            await context.bot.send_photo(
+                chat_id=SELLER_ID,
+                photo=file_id,
+                caption=seller_text,
+                reply_markup=seller_payment_keyboard(order_id),
+                parse_mode='Markdown'
+            )
+            
+            await update.message.reply_text(
+                "✅ *Фото отправлено продавцу!*\n\n"
+                "⏳ *Ожидайте подтверждения оплаты*\n\n"
+                "Продавец проверит платеж и подтвердит получение средств.",
+                parse_mode='Markdown'
+            )
+            
+            logger.info(f"Фото оплаты отправлено продавцу для заказа {order_id}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки фото продавцу: {e}")
+            await update.message.reply_text(
+                "❌ *Не удалось отправить фото продавцу*\n\n"
+                "Пожалуйста, попробуйте еще раз или свяжитесь с продавцом напрямую.",
+                parse_mode='Markdown'
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка при обработке фото. Попробуйте еще раз."
+        )
+
+# Обработка ошибок
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Ошибка при обработке обновления {update}: {context.error}")
+    
+    try:
+        # Уведомляем пользователя об ошибке
         if update and update.effective_user:
             await context.bot.send_message(
                 chat_id=update.effective_user.id,
                 text="❌ Произошла непредвиденная ошибка. Пожалуйста, попробуйте еще раз."
             )
     except Exception as e:
-        logger.error(f"Ошибка при отправке сообщения об ошибке: {e}")
+        logger.error(f"Ошибка при уведомлении пользователя: {e}")
 
 # Основная функция
 def main():
@@ -1047,10 +1198,13 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Обработчик ошибок
+    application.add_handler(CallbackQueryHandler(button_handler))
+    
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
     application.add_error_handler(error_handler)
     
     # Запускаем периодическое сохранение данных
@@ -1058,21 +1212,11 @@ def main():
     loop.create_task(periodic_save())
     
     # Запускаем бота
-    logger.info("Бот запущен")
-    print("🤖 Бот запущен! Для остановки нажмите Ctrl+C")
+    logger.info("Бот запущен!")
+    print("🤖 Бот запущен и готов к работе!")
+    print("⚡ Используйте Ctrl+C для остановки")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
-        print("\n👋 Бот остановлен")
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
-        print(f"❌ Критическая ошибка: {e}")
-    finally:
-        # Сохраняем данные при завершении
-        save_all_data()
-        logger.info("Данные сохранены при завершении работы")
+    main()
