@@ -897,7 +897,7 @@ async def handle_review(update, context, order_id, review_text):
                 text=review_message,
                 parse_mode='Markdown'
             )
-                except Exception as e:
+        except Exception as e:
             logger.error(f"Ошибка отправки отзыва продавцу: {e}")
 
         await update.message.reply_text(
@@ -1220,3 +1220,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
